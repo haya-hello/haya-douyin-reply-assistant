@@ -14,7 +14,7 @@ import reply_memory as memory
 
 ROOT = memory.ROOT
 DATA = ROOT / 'data'
-RELEASE = DATA / 'releases/v1.0.0'
+RELEASE = DATA / 'releases' / ('v'+json.loads((ROOT/'version.json').read_text(encoding='utf-8'))['version'])
 ROOTS = {'reply-assistant': ROOT, 'douyin-cli': memory.COMMENTS, 'DMShoot': memory.DMS}
 BLOCKED_PARTS = {'data','local','storage','logs','reports','screenshots','__pycache__','.venv','node_modules','.npm-cache','.git','.wheels','.auth'}
 
@@ -60,12 +60,12 @@ def source_files():
 
 def freeze():
     if RELEASE.exists():
-        raise RuntimeError('V1 release already exists; never overwrite a frozen release.')
+        raise RuntimeError('This release already exists; never overwrite a frozen release.')
     files = source_files()
     # 阻止运行配置混入源码包 / Prevent live configuration from entering the source archive.
     assert not any('/data/' in name or '/local/' in name or name.endswith('/config.json') for name in files)
     RELEASE.mkdir(parents=True)
-    manifest = {'version':'1.0.0', 'created_at':datetime.now(timezone.utc).isoformat(),
+    manifest = {'version':json.loads((ROOT/'version.json').read_text(encoding='utf-8'))['version'], 'created_at':datetime.now(timezone.utc).isoformat(),
                 'files':{}, 'upstream':{}, 'runtime':{}, 'contains_runtime_credentials':False,
                 'credentials_restore':'Reconfigure model credentials and re-login; never restore them from this bundle.'}
     with zipfile.ZipFile(RELEASE / 'source.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -113,7 +113,7 @@ def logical_digest(path, omit_config=True):
 
 
 def backup():
-    if (DATA/'comment-run.lock').exists():
+    if (DATA/'comment-run.lock').exists() or (DATA/'reply-run.lock').exists():
         raise RuntimeError('An active or interrupted batch exists; review before snapshotting.')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:6]
     output = DATA/'backups'/stamp

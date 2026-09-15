@@ -1,10 +1,10 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "蛤鸭回复助手",
-  "release_scope": "on_demand_comments_and_private_reply_memory",
+  "release_scope": "on_demand_comment_and_dm_batches",
   "comment_batch": "implemented_mock_tested",
   "comment_single_delivery": "live_verified",
   "dm_single_delivery": "live_verified",
-  "dm_batch": "not_implemented",
+  "dm_batch": "implemented_mock_tested_live_snapshot_verified",
   "reboot_scope": "managed_bridge_and_fresh_cli_processes_not_operating_system"
 }

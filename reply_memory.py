@@ -47,8 +47,11 @@ def connect(path=None):
       channel TEXT, source_id TEXT, thread_id TEXT, incoming TEXT, draft TEXT,
       reason TEXT, status TEXT, created_at REAL, PRIMARY KEY(channel,source_id));
     CREATE TABLE IF NOT EXISTS runtime_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS dm_live_messages (
+      source_id TEXT PRIMARY KEY, thread_id TEXT, peer_uid TEXT, sender_uid TEXT,
+      is_self INTEGER, text TEXT, kind TEXT, source_time REAL, message_index INTEGER, seen_at REAL);
     ''')
-    db.execute('PRAGMA user_version=1')
+    db.execute('PRAGMA user_version=2')
     return db
 
 
@@ -97,13 +100,13 @@ def import_dm_rows(db, rows):
             return
         # 每条原始发送 ID 只入库一次 / Deduplicate each actual outgoing message by server ID.
         for reply in group:
-            automated = reply['is_auto'] or reply['content'] == TEST_REPLY
+            source_id = reply['message_key'] or f"local:{reply['id']}"
+            automated = reply['is_auto'] or reply['content'] == TEST_REPLY or bool(db.execute("SELECT 1 FROM send_attempts WHERE channel='dm' AND reply_id=?",(source_id,)).fetchone())
             provenance = 'tool_generated' if automated else 'account_history_unverified'
             if not pending and not automated:
                 provenance = 'unpaired_outgoing'
             if pending and reply['timestamp'] - pending[-1]['timestamp'] > 7 * 86400:
                 provenance = 'ambiguous_pair'
-            source_id = reply['message_key'] or f"local:{reply['id']}"
             save_sample(db, 'dm', source_id, reply['session_id'],
                         '\n'.join(r['content'] for r in pending), reply['content'],
                         provenance=provenance, timestamp=reply['timestamp'])
@@ -286,7 +289,9 @@ def reply_comments(db, count=5, send=False):
     assert policy['mode'] == 'on_demand' and not policy['background_monitoring']
     if send and db.execute("SELECT 1 FROM send_attempts WHERE status IN ('attempting','uncertain_stop_no_retry')").fetchone():
         raise RuntimeError('An earlier delivery is unresolved; review it before any further sending.')
-    lock = ROOT / 'data/comment-run.lock'
+    if (ROOT / 'data/comment-run.lock').exists():
+        raise RuntimeError('Legacy batch lock exists; review before starting.')
+    lock = ROOT / 'data/reply-run.lock'
     try:
         handle = lock.open('x', encoding='utf-8')
     except FileExistsError:

@@ -52,21 +52,21 @@ def state_snapshot():
     result = {'policy': json_file(ROOT / 'policy.json'), 'version': json_file(ROOT / 'version.json')['version']}
     result['db_integrity'] = db.execute('PRAGMA integrity_check').fetchone()[0]
     result['tables'] = {name: db.execute(f'SELECT count(*) FROM {name}').fetchone()[0]
-                        for name in ('samples','dm_history','send_attempts','handoffs','runtime_meta')}
+                        for name in ('samples','dm_history','dm_live_messages','send_attempts','handoffs','runtime_meta')}
     result['unresolved_sends'] = db.execute("SELECT count(*) FROM send_attempts WHERE status IN ('attempting','uncertain_stop_no_retry')").fetchone()[0]
     result['last_write_attempt_at'] = (db.execute("SELECT value FROM runtime_meta WHERE key='last_write_attempt_at'").fetchone() or [None])[0]
-    result['run_lock_present'] = (DATA / 'comment-run.lock').exists()
+    result['run_lock_present'] = (DATA / 'comment-run.lock').exists() or (DATA / 'reply-run.lock').exists()
     db.close()
     try:
         remote = fetch(BRIDGE + '/api/status')
         result['bridge'] = {'online': remote.get('ok') is True, 'connections': remote.get('totalConnections', 0)}
     except Exception:
         result['bridge'] = {'online': False, 'connections': 0}
-    result['dm_batch'] = 'not_implemented'
+    result['dm_batch'] = json_file(ROOT/'version.json')['dm_batch']
     return result
 
 
-def doctor(online=False):
+def doctor(online=False, channel='comment'):
     checks = {}
     state = state_snapshot()
     checks['database'] = state['db_integrity'] == 'ok'
@@ -77,33 +77,43 @@ def doctor(online=False):
     checks['node_available'] = shutil.which('node') is not None
     try:
         settings = json_file(memory.COMMENTS / 'config.json')
-        script = (memory.COMMENTS / 'local/douyin.user.js').read_text(encoding='utf-8')
-        checks['local_configuration'] = bool(settings['llm']['api_key'] and settings['bridge']['token'])
-        checks['script_token_matches'] = ("token: '" + settings['bridge']['token'] + "'") in script
-        checks['loopback_only'] = settings['bridge']['host'] == '127.0.0.1'
+        checks['local_configuration'] = bool(settings['llm']['api_key'] and (settings['bridge']['token'] if channel=='comment' else True))
+        if channel == 'comment':
+            script = (memory.COMMENTS / 'local/douyin.user.js').read_text(encoding='utf-8')
+            checks['script_token_matches'] = ("token: '" + settings['bridge']['token'] + "'") in script
+            checks['loopback_only'] = settings['bridge']['host'] == '127.0.0.1'
     except Exception:
         settings = None
         checks['local_configuration'] = False
-    if (DATA / 'releases/v1.0.0/manifest.json').exists():
+    if (DATA / 'releases' / ('v'+state['version']) / 'manifest.json').exists():
         import release_tools
         checks['frozen_source_matches'] = release_tools.verify_release()['ok']
     else:
         checks['frozen_source_matches'] = False
     if online:
-        checks['bridge_online'] = state['bridge']['online']
-        checks['browser_connected'] = state['bridge']['connections'] > 0
-        try:
-            videos = memory.cli('my', '--count', '1')
-            checks['account_identity'] = bool(videos and videos[0].get('owner_uid') == memory.SELF_UID)
-        except Exception:
-            checks['account_identity'] = False
+        if channel == 'comment':
+            checks['bridge_online'] = state['bridge']['online']
+            checks['browser_connected'] = state['bridge']['connections'] > 0
+            try:
+                videos = memory.cli('my', '--count', '1') if state['bridge']['connections'] else []
+                checks['account_identity'] = bool(videos and videos[0].get('owner_uid') == memory.SELF_UID)
+            except Exception:
+                checks['account_identity'] = False
+        else:
+            try:
+                from dm_batch import DouyinTransport
+                transport = DouyinTransport()
+                checks['dm_identity_and_signing'] = True
+                transport.close()
+            except Exception:
+                checks['dm_identity_and_signing'] = False
         try:
             models = fetch(settings['llm']['base_url'].rstrip('/') + '/models', settings['llm']['api_key'])
             checks['model_gateway'] = settings['llm']['model'] in {m['id'] for m in models.get('data', [])}
         except Exception:
             checks['model_gateway'] = False
     result = {'ok': all(checks.values()), 'checks': checks, 'state': state, 'social_messages_sent': 0}
-    write_json(DATA / 'qa/doctor-latest.json', result)
+    write_json(DATA / 'qa' / ('doctor-dm-latest.json' if channel=='dm' else 'doctor-latest.json'), result)
     return result
 
 
@@ -177,25 +187,31 @@ def restart_check():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', nargs='?', default='status', choices=['status','doctor','start','stop','restart-check','backup','freeze','verify-release','restore-check','preview','reply','handoffs'])
+    parser.add_argument('action', nargs='?', default='status', choices=['status','doctor','doctor-dm','start','stop','restart-check','backup','freeze','verify-release','restore-check','preview','reply','dm-preview','dm-reply','handoffs'])
     parser.add_argument('--online', action='store_true')
     parser.add_argument('--confirm-send', action='store_true')
     args = parser.parse_args()
     if args.action == 'status': result = state_snapshot()
     elif args.action == 'doctor': result = doctor(args.online)
+    elif args.action == 'doctor-dm': result = doctor(args.online,'dm')
     elif args.action == 'start': result = bridge_start()
     elif args.action == 'stop': result = bridge_stop()
     elif args.action == 'restart-check': result = restart_check()
     elif args.action in ('backup','freeze','verify-release','restore-check'):
         import release_tools
         result = getattr(release_tools, args.action.replace('-', '_'))()
-    elif args.action in ('preview','reply'):
-        if args.action == 'reply' and not args.confirm_send:
+    elif args.action in ('preview','reply','dm-preview','dm-reply'):
+        if args.action in ('reply','dm-reply') and not args.confirm_send:
             raise RuntimeError('Actual sending requires --confirm-send and a current user reply request.')
-        if not doctor(True)['ok']:
+        channel = 'dm' if args.action.startswith('dm-') else 'comment'
+        if not doctor(True,channel)['ok']:
             raise RuntimeError('Preflight failed; inspect doctor-latest.json. No messages sent.')
         db = memory.connect()
-        result = memory.reply_comments(db, 20, send=args.action == 'reply')
+        if channel=='dm':
+            from dm_batch import run_batch
+            result = run_batch(db,send=args.action=='dm-reply')
+        else:
+            result = memory.reply_comments(db, 20, send=args.action == 'reply')
         db.commit()
         db.close()
     else:
