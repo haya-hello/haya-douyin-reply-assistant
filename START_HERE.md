@@ -4,6 +4,8 @@
 
 `D:\自媒体项目\AI+自媒体\accounts\蛤鸭-抖音\reply-assistant`
 
+私有 GitHub 版本库：`https://github.com/haya-hello/haya-douyin-reply-assistant`。本地生产目录仍是上面的唯一运行入口；GitHub 只保存脱敏源码与文档，不保存 `data/`、密钥、Cookie 或浏览器登录态。
+
 先读本页，再读AGENTS.md、policy.json、version.json。不依赖旧聊天，不从旧测试脚本恢复发送。无需专用Skill，正式入口为本地受限命令行。
 
 ## 能力边界
